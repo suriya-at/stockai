@@ -5,19 +5,40 @@ import os
 import time
 from dotenv import load_dotenv
 
-# Load environment variables from .env if available
+# Load environment variables from .env if available locally
 load_dotenv()
 
 log = logging.getLogger(__name__)
 
+def get_api_key() -> str:
+    """Retrieve GEMINI_API_KEY from environment variables or Streamlit Cloud Secrets."""
+    key = os.getenv("GEMINI_API_KEY", "").strip()
+    if not key:
+        try:
+            import streamlit as st
+            if hasattr(st, "secrets") and "GEMINI_API_KEY" in st.secrets:
+                key = str(st.secrets["GEMINI_API_KEY"]).strip()
+        except Exception:
+            pass
+    return key
+
 def get_gemini_model_name() -> str:
-    return os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+    """Retrieve GEMINI_MODEL from environment variables, Streamlit Cloud Secrets, or default."""
+    model = os.getenv("GEMINI_MODEL", "").strip()
+    if not model:
+        try:
+            import streamlit as st
+            if hasattr(st, "secrets") and "GEMINI_MODEL" in st.secrets:
+                model = str(st.secrets["GEMINI_MODEL"]).strip()
+        except Exception:
+            pass
+    return model or "gemini-2.5-flash"
 
 def get_gemini_client():
     """Initialize and return google-genai Client if GEMINI_API_KEY is configured."""
-    api_key = os.getenv("GEMINI_API_KEY", "").strip()
+    api_key = get_api_key()
     if not api_key:
-        return None, "GEMINI_API_KEY is not configured in environment or .env file."
+        return None, "GEMINI_API_KEY is missing. Set it in .env (local) or Streamlit Secrets (cloud)."
     try:
         from google import genai
         client = genai.Client(api_key=api_key)
@@ -27,14 +48,14 @@ def get_gemini_client():
 
 def get_gemini_status() -> dict:
     """Return status information about the Gemini API connection."""
-    api_key = os.getenv("GEMINI_API_KEY", "").strip()
+    api_key = get_api_key()
     model_name = get_gemini_model_name()
     if not api_key:
         return {
             "connected": False,
             "api_key_configured": False,
             "model": model_name,
-            "error": "GEMINI_API_KEY is missing. Set it in .env or environment.",
+            "error": "GEMINI_API_KEY is missing. Add it in Streamlit Cloud Secrets (or .env locally).",
         }
     client, err = get_gemini_client()
     if err or not client:
@@ -64,11 +85,11 @@ def analyze_sentiment(
         sentiment: "positive", "negative", or "neutral"
         score: float between -1.0 and 1.0
     """
-    api_key = os.getenv("GEMINI_API_KEY", "").strip()
+    api_key = get_api_key()
     target_model = model_name or get_gemini_model_name()
     
     if not api_key:
-        return None, None, target_model, "GEMINI_API_KEY environment variable is missing"
+        return None, None, target_model, "GEMINI_API_KEY is missing. Add it to Streamlit Secrets or .env."
 
     try:
         from google import genai

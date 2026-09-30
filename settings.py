@@ -10,8 +10,19 @@ NEWS_DIR = DATA_DIR / "news"
 MODEL_DIR = DATA_DIR / "models"
 DEFAULT_TICKER = "RELIANCE.NS"
 
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+def get_secret(name: str, default: str = "") -> str:
+    val = os.getenv(name, "").strip()
+    if not val:
+        try:
+            import streamlit as st
+            if hasattr(st, "secrets") and name in st.secrets:
+                val = str(st.secrets[name]).strip()
+        except Exception:
+            pass
+    return val or default
+
+GEMINI_API_KEY = get_secret("GEMINI_API_KEY", "")
+GEMINI_MODEL = get_secret("GEMINI_MODEL", "gemini-2.5-flash")
 
 MARKET_CLOSE_HOUR = 15
 MARKET_CLOSE_MINUTE = 30
