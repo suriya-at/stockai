@@ -22,7 +22,7 @@ def get_secret(name: str, default: str = "") -> str:
     return val or default
 
 GEMINI_API_KEY = get_secret("GEMINI_API_KEY", "")
-GEMINI_MODEL = get_secret("GEMINI_MODEL", "gemini-2.5-flash")
+GEMINI_MODEL = get_secret("GEMINI_MODEL", "gemini-3.5-flash")
 
 MARKET_CLOSE_HOUR = 15
 MARKET_CLOSE_MINUTE = 30

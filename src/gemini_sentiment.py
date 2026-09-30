@@ -10,6 +10,8 @@ load_dotenv()
 
 log = logging.getLogger(__name__)
 
+FALLBACK_MODELS = ["gemini-3.5-flash", "gemini-3.8-flash", "gemini-3.5-flash-lite"]
+
 def get_api_key() -> str:
     """Retrieve GEMINI_API_KEY from environment variables or Streamlit Cloud Secrets."""
     key = os.getenv("GEMINI_API_KEY", "").strip()
@@ -32,7 +34,7 @@ def get_gemini_model_name() -> str:
                 model = str(st.secrets["GEMINI_MODEL"]).strip()
         except Exception:
             pass
-    return model or "gemini-2.5-flash"
+    return model or "gemini-3.5-flash"
 
 def get_gemini_client():
     """Initialize and return google-genai Client if GEMINI_API_KEY is configured."""
@@ -76,7 +78,7 @@ def analyze_sentiment(
     title: str,
     company_name: str,
     model_name: str | None = None,
-    retries: int = 2
+    retries: int = 1
 ) -> tuple[str | None, float | None, str, str]:
     """Analyze financial sentiment of a headline towards a company using Gemini API.
     
@@ -86,17 +88,17 @@ def analyze_sentiment(
         score: float between -1.0 and 1.0
     """
     api_key = get_api_key()
-    target_model = model_name or get_gemini_model_name()
+    primary_model = model_name or get_gemini_model_name()
     
     if not api_key:
-        return None, None, target_model, "GEMINI_API_KEY is missing. Add it to Streamlit Secrets or .env."
+        return None, None, primary_model, "GEMINI_API_KEY is missing. Add it to Streamlit Secrets or .env."
 
     try:
         from google import genai
         from google.genai import types
         client = genai.Client(api_key=api_key)
     except Exception as exc:
-        return None, None, target_model, f"Gemini SDK error: {exc}"
+        return None, None, primary_model, f"Gemini SDK error: {exc}"
 
     prompt = (
         f"Analyze the financial sentiment of this news article toward the specified company.\n\n"
@@ -113,39 +115,45 @@ def analyze_sentiment(
         f"Return only JSON."
     )
 
+    models_to_try = [primary_model] + [m for m in FALLBACK_MODELS if m != primary_model]
     last_error = "Unknown error"
-    for attempt in range(retries + 1):
-        try:
-            response = client.models.generate_content(
-                model=target_model,
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    response_mime_type="application/json",
-                    temperature=0.0,
-                ),
-            )
-            raw_text = (response.text or "").strip()
-            log.debug("Gemini raw response: %s", raw_text)
 
-            if not raw_text:
-                raise ValueError("Received empty response from Gemini API.")
+    for target_model in models_to_try:
+        for attempt in range(retries + 1):
+            try:
+                response = client.models.generate_content(
+                    model=target_model,
+                    contents=prompt,
+                    config=types.GenerateContentConfig(
+                        response_mime_type="application/json",
+                        temperature=0.0,
+                    ),
+                )
+                raw_text = (response.text or "").strip()
+                log.debug("Gemini raw response from %s: %s", target_model, raw_text)
 
-            cleaned = raw_text.replace("```json", "").replace("```", "").strip()
-            parsed = json.loads(cleaned)
+                if not raw_text:
+                    raise ValueError("Received empty response from Gemini API.")
 
-            label = str(parsed.get("sentiment", "")).lower()
-            score = float(parsed.get("score", 0.0))
+                cleaned = raw_text.replace("```json", "").replace("```", "").strip()
+                parsed = json.loads(cleaned)
 
-            if label not in {"positive", "negative", "neutral"}:
-                raise ValueError(f"Invalid sentiment label '{label}' returned from Gemini.")
-            if not (-1.0 <= score <= 1.0):
-                raise ValueError(f"Score {score} out of valid range [-1, 1].")
+                label = str(parsed.get("sentiment", "")).lower()
+                score = float(parsed.get("score", 0.0))
 
-            return label, score, target_model, ""
-        except Exception as exc:
-            last_error = str(exc)
-            log.warning("Gemini sentiment attempt %d failed: %s", attempt + 1, last_error)
-            if attempt < retries:
-                time.sleep(1.5 * (attempt + 1))
+                if label not in {"positive", "negative", "neutral"}:
+                    raise ValueError(f"Invalid sentiment label '{label}' returned from Gemini.")
+                if not (-1.0 <= score <= 1.0):
+                    raise ValueError(f"Score {score} out of valid range [-1, 1].")
 
-    return None, None, target_model, last_error
+                return label, score, target_model, ""
+            except Exception as exc:
+                last_error = str(exc)
+                log.warning("Gemini sentiment attempt %d on %s failed: %s", attempt + 1, target_model, last_error)
+                # If model not found or unavailable, break retry loop to try next fallback model immediately
+                if "404" in last_error or "503" in last_error or "NOT_FOUND" in last_error or "UNAVAILABLE" in last_error:
+                    break
+                if attempt < retries:
+                    time.sleep(1)
+
+    return None, None, primary_model, last_error
