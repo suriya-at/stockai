@@ -1,0 +1,12 @@
+.env
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+data/
+.venv/
+venv/
+pip-install.log
+pip-install.err
+streamlit.err
+streamlit.log
