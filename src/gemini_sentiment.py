@@ -1,159 +1,175 @@
+"""Gemini configuration, diagnostics, and structured headline sentiment."""
 from __future__ import annotations
+
 import json
 import logging
 import os
-import time
+import re
+from typing import Any
+
 from dotenv import load_dotenv
 
-# Load environment variables from .env if available locally
 load_dotenv()
-
 log = logging.getLogger(__name__)
+DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
 
-FALLBACK_MODELS = ["gemini-3.5-flash", "gemini-3.8-flash", "gemini-3.5-flash-lite"]
+
+def _secret(name: str) -> str:
+    """Return a secret without logging its value."""
+    value = os.getenv(name, "").strip()
+    if value:
+        return value
+    try:
+        import streamlit as st
+        if name in st.secrets:
+            return str(st.secrets[name]).strip()
+    except Exception:
+        pass
+    return ""
+
 
 def get_api_key() -> str:
-    """Retrieve GEMINI_API_KEY from environment variables or Streamlit Cloud Secrets."""
-    key = os.getenv("GEMINI_API_KEY", "").strip()
-    if not key:
-        try:
-            import streamlit as st
-            if hasattr(st, "secrets") and "GEMINI_API_KEY" in st.secrets:
-                key = str(st.secrets["GEMINI_API_KEY"]).strip()
-        except Exception:
-            pass
-    return key
+    return _secret("GEMINI_API_KEY")
+
 
 def get_gemini_model_name() -> str:
-    """Retrieve GEMINI_MODEL from environment variables, Streamlit Cloud Secrets, or default."""
-    model = os.getenv("GEMINI_MODEL", "").strip()
-    if not model:
-        try:
-            import streamlit as st
-            if hasattr(st, "secrets") and "GEMINI_MODEL" in st.secrets:
-                model = str(st.secrets["GEMINI_MODEL"]).strip()
-        except Exception:
-            pass
-    return model or "gemini-3.5-flash"
+    return _secret("GEMINI_MODEL") or DEFAULT_GEMINI_MODEL
 
-def get_gemini_client():
-    """Initialize and return google-genai Client if GEMINI_API_KEY is configured."""
-    api_key = get_api_key()
-    if not api_key:
-        return None, "GEMINI_API_KEY is missing. Set it in .env (local) or Streamlit Secrets (cloud)."
-    try:
-        from google import genai
-        client = genai.Client(api_key=api_key)
-        return client, ""
-    except Exception as exc:
-        return None, f"Failed to initialize Gemini client: {exc}"
 
-def get_gemini_status() -> dict:
-    """Return status information about the Gemini API connection."""
-    api_key = get_api_key()
-    model_name = get_gemini_model_name()
-    if not api_key:
-        return {
-            "connected": False,
-            "api_key_configured": False,
-            "model": model_name,
-            "error": "GEMINI_API_KEY is missing. Add it in Streamlit Cloud Secrets (or .env locally).",
-        }
-    client, err = get_gemini_client()
-    if err or not client:
-        return {
-            "connected": False,
-            "api_key_configured": True,
-            "model": model_name,
-            "error": err,
-        }
+def get_key_status() -> dict[str, Any]:
+    gemini_key, google_key = get_api_key(), _secret("GOOGLE_API_KEY")
     return {
-        "connected": True,
-        "api_key_configured": True,
-        "model": model_name,
-        "error": "",
+        "gemini_api_key_configured": bool(gemini_key),
+        "google_api_key_configured": bool(google_key),
+        "key_conflict": bool(gemini_key and google_key),
+        # Explicit Client(api_key=...) prevents a stale GOOGLE_API_KEY override.
+        "selected_key": "GEMINI_API_KEY" if gemini_key else None,
     }
 
-def analyze_sentiment(
-    title: str,
-    company_name: str,
-    model_name: str | None = None,
-    retries: int = 1
-) -> tuple[str | None, float | None, str, str]:
-    """Analyze financial sentiment of a headline towards a company using Gemini API.
-    
-    Returns:
-        (sentiment, score, model_used, error_message)
-        sentiment: "positive", "negative", or "neutral"
-        score: float between -1.0 and 1.0
-    """
-    api_key = get_api_key()
-    primary_model = model_name or get_gemini_model_name()
-    
-    if not api_key:
-        return None, None, primary_model, "GEMINI_API_KEY is missing. Add it to Streamlit Secrets or .env."
 
+def classify_gemini_error(error: Exception | str) -> tuple[str, str]:
+    """Return a stable category plus an actionable, key-safe message."""
+    message = str(error).strip()
+    lower = message.lower()
+    match = re.search(r"\b(401|403|404|408|429|500|502|503|504)\b", message)
+    status = match.group(1) if match else ""
+    if status == "401" or "unauthenticated" in lower or "api key not valid" in lower or "invalid api key" in lower:
+        return "authentication", "Authentication failed. The Gemini API key may be invalid, revoked, or expired. " + message
+    if status == "403" or "permission_denied" in lower or "permission denied" in lower:
+        if "restrict" in lower or "api target" in lower or "referer" in lower:
+            return "key_restriction", "The API key restriction rejected this request. In Google AI Studio, update the key to allow the Gemini API. " + message
+        return "permission", "The key is recognized but lacks Gemini API access. Check its Google AI Studio project, API access, and restrictions. " + message
+    if status == "404" or "not_found" in lower or "not found" in lower or "unsupported model" in lower:
+        return "model_unavailable", "The configured Gemini model is not available to this API key. Set GEMINI_MODEL to a model returned by the diagnostic. " + message
+    if status == "429" or "resource_exhausted" in lower or "quota" in lower or "rate limit" in lower:
+        return "quota_or_rate_limit", "Gemini rejected the request because of a rate limit, quota, or billing limit. Check usage and billing in Google AI Studio. " + message
+    if any(token in lower for token in ("timeout", "connection", "dns", "network", "connecterror", "readerror")):
+        return "network", "Could not reach the Gemini API. Check internet access, proxy settings, and try again. " + message
+    if isinstance(error, (ImportError, ModuleNotFoundError)) or "google-genai" in lower:
+        return "sdk", "The Google GenAI SDK could not be imported or initialized. Run `pip install -U google-genai`. " + message
+    if status in {"500", "502", "503", "504"} or "unavailable" in lower:
+        return "service", "The Gemini service is temporarily unavailable. Retry shortly. " + message
+    return "request", message or error.__class__.__name__
+
+
+def get_gemini_client():
+    """Create the current google-genai client using GEMINI_API_KEY explicitly."""
+    api_key = get_api_key()
+    if not api_key:
+        return None, "GEMINI_API_KEY not found. Add it to .env locally or Streamlit Secrets in deployment."
     try:
         from google import genai
-        from google.genai import types
-        client = genai.Client(api_key=api_key)
+        return genai.Client(api_key=api_key), ""
     except Exception as exc:
-        return None, None, primary_model, f"Gemini SDK error: {exc}"
+        return None, classify_gemini_error(exc)[1]
 
-    prompt = (
-        f"Analyze the financial sentiment of this news article toward the specified company.\n\n"
-        f"Company:\n{company_name}\n\n"
-        f"Headline:\n{title}\n\n"
-        f"Return JSON:\n"
-        f"{{\n"
-        f'    "sentiment": "positive",\n'
-        f'    "score": 0.5\n'
-        f"}}\n\n"
-        f"Rules:\n"
-        f"sentiment must be:\npositive\nnegative\nneutral\n\n"
-        f"score must be between -1 and 1.\n\n"
-        f"Return only JSON."
-    )
 
-    models_to_try = [primary_model] + [m for m in FALLBACK_MODELS if m != primary_model]
-    last_error = "Unknown error"
+def _model_names(client: Any) -> list[str]:
+    return [model.name for model in client.models.list() if getattr(model, "name", None)]
 
-    for target_model in models_to_try:
-        for attempt in range(retries + 1):
-            try:
-                response = client.models.generate_content(
-                    model=target_model,
-                    contents=prompt,
-                    config=types.GenerateContentConfig(
-                        response_mime_type="application/json",
-                        temperature=0.0,
-                    ),
-                )
-                raw_text = (response.text or "").strip()
-                log.debug("Gemini raw response from %s: %s", target_model, raw_text)
 
-                if not raw_text:
-                    raise ValueError("Received empty response from Gemini API.")
+def check_gemini_connection() -> dict[str, Any]:
+    """Make a live list-models + generation health check; client creation is not success."""
+    model_name, keys = get_gemini_model_name(), get_key_status()
+    result: dict[str, Any] = {
+        "connected": False, "api_key_configured": keys["gemini_api_key_configured"],
+        "google_api_key_configured": keys["google_api_key_configured"], "key_conflict": keys["key_conflict"],
+        "model": model_name, "model_available": None, "available_models": [],
+        "error_type": "", "error_message": "", "error": "",
+    }
+    if not keys["gemini_api_key_configured"]:
+        result.update(error_type="missing_key", error_message="GEMINI_API_KEY not found.", error="GEMINI_API_KEY not found.")
+        return result
+    client, client_error = get_gemini_client()
+    if client is None:
+        result.update(error_type="sdk", error_message=client_error, error=client_error)
+        return result
+    try:
+        result["available_models"] = _model_names(client)
+        requested = model_name.removeprefix("models/")
+        result["model_available"] = any(name.removeprefix("models/") == requested for name in result["available_models"])
+        if not result["model_available"]:
+            message = f"Configured model '{model_name}' was not returned for this API key."
+            result.update(error_type="model_unavailable", error_message=message, error=message)
+            return result
+        client.models.generate_content(model=model_name, contents="Reply with OK.")
+        result["connected"] = True
+        return result
+    except Exception as exc:
+        kind, message = classify_gemini_error(exc)
+        result.update(error_type=kind, error_message=message, error=message)
+        return result
 
-                cleaned = raw_text.replace("```json", "").replace("```", "").strip()
-                parsed = json.loads(cleaned)
 
-                label = str(parsed.get("sentiment", "")).lower()
-                score = float(parsed.get("score", 0.0))
+def get_gemini_status() -> dict[str, Any]:
+    return check_gemini_connection()
 
-                if label not in {"positive", "negative", "neutral"}:
-                    raise ValueError(f"Invalid sentiment label '{label}' returned from Gemini.")
-                if not (-1.0 <= score <= 1.0):
-                    raise ValueError(f"Score {score} out of valid range [-1, 1].")
 
-                return label, score, target_model, ""
-            except Exception as exc:
-                last_error = str(exc)
-                log.warning("Gemini sentiment attempt %d on %s failed: %s", attempt + 1, target_model, last_error)
-                # If model not found or unavailable, break retry loop to try next fallback model immediately
-                if "404" in last_error or "503" in last_error or "NOT_FOUND" in last_error or "UNAVAILABLE" in last_error:
-                    break
-                if attempt < retries:
-                    time.sleep(1)
+def analyze_sentiment(title: str, company_name: str, model_name: str | None = None, retries: int = 1) -> tuple[str | None, float | None, str, str]:
+    """Analyze a headline in Gemini JSON mode; errors are never neutral scores."""
+    selected_model = model_name or get_gemini_model_name()
+    client, client_error = get_gemini_client()
+    if client is None:
+        return None, None, selected_model, client_error
+    try:
+        from google.genai import types
+    except Exception as exc:
+        return None, None, selected_model, classify_gemini_error(exc)[1]
+    prompt = f'''Analyze the financial sentiment of this news headline toward the specified company.
 
-    return None, None, primary_model, last_error
+Company:
+{company_name}
+
+Headline:
+{title}
+
+Return only valid JSON:
+
+{{
+    "sentiment": "positive",
+    "score": 0.5
+}}
+
+Rules:
+- sentiment must be positive, negative, or neutral
+- score must be between -1 and 1
+- positive sentiment should have a positive score
+- negative sentiment should have a negative score
+- neutral sentiment should have a score near 0
+- return JSON only'''
+    schema = {"type": "object", "properties": {"sentiment": {"type": "string", "enum": ["positive", "negative", "neutral"]}, "score": {"type": "number", "minimum": -1, "maximum": 1}}, "required": ["sentiment", "score"]}
+    last_error = "Gemini request did not return a result."
+    for _ in range(retries + 1):
+        try:
+            response = client.models.generate_content(model=selected_model, contents=prompt, config=types.GenerateContentConfig(response_mime_type="application/json", response_schema=schema, temperature=0.0))
+            parsed = json.loads((response.text or "").strip())
+            label, score = str(parsed["sentiment"]).lower(), float(parsed["score"])
+            if label not in {"positive", "negative", "neutral"} or not -1.0 <= score <= 1.0:
+                raise ValueError("Gemini returned invalid sentiment JSON values.")
+            return label, score, selected_model, ""
+        except Exception as exc:
+            kind, last_error = classify_gemini_error(exc)
+            log.warning("Gemini sentiment request failed (%s): %s", kind, last_error)
+            if kind in {"authentication", "permission", "key_restriction", "model_unavailable", "quota_or_rate_limit"}:
+                break
+    return None, None, selected_model, last_error

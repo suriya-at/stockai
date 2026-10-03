@@ -44,6 +44,14 @@ $env:GEMINI_MODEL = "gemini-2.5-flash"
 
 Restart Streamlit after setting the variable. Do not add the key to `settings.py`, a CSV file, or Git. Gemini requests use the API-key header and JSON-mode content generation, as described in the [official Gemini API reference](https://ai.google.dev/api).
 
+Before starting Streamlit, run the key-safe connection diagnostic:
+
+```powershell
+venv\Scripts\python.exe test_gemini.py
+```
+
+It lists only models available to the configured key and performs one minimal generation request. It never prints a key. If both `GEMINI_API_KEY` and `GOOGLE_API_KEY` are set, the application reports the conflict and explicitly uses `GEMINI_API_KEY`; remove an obsolete `GOOGLE_API_KEY` if it is not needed elsewhere.
+
 ## Run
 
 ```powershell

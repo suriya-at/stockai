@@ -4,7 +4,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-from settings import DEFAULT_TICKER, GEMINI_API_KEY, GEMINI_MODEL
+from settings import DEFAULT_TICKER
 from src.market_data import resolve_ticker, get_company_name, get_company_info, search_tickers, MarketDataError
 from src.news import collect_news, news_file
 from src.sentiment import analyze_unprocessed, sentiment_file
@@ -64,8 +64,13 @@ with st.sidebar:
     if gem_status["connected"]:
         st.success(f"**Gemini API:** Connected\n\n**Model:** `{gem_status['model']}`")
     else:
-        st.error(f"**Gemini API:** Offline\n\n{gem_status['error']}")
-        st.info("Add `GEMINI_API_KEY=your_key` to `.env` file to enable news sentiment.")
+        st.error(f"**Gemini API:** Failed\n\n**Error type:** `{gem_status['error_type']}`\n\n{gem_status['error_message']}")
+    st.caption(
+        f"GEMINI_API_KEY: {'configured' if gem_status['api_key_configured'] else 'not configured'} | "
+        f"GOOGLE_API_KEY: {'configured' if gem_status['google_api_key_configured'] else 'not configured'}"
+    )
+    if gem_status["key_conflict"]:
+        st.warning("Both key variables are configured. This app explicitly uses GEMINI_API_KEY so GOOGLE_API_KEY cannot override it.")
 
     # Show headline statistics for resolved ticker if available
     if is_valid and sentiment_file(resolved_ticker).exists():
